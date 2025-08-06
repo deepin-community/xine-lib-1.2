@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2003-2019 the xine project
+ * Copyright (C) 2003-2024 the xine project
  *
  * This file is part of xine, a free video player.
  *
@@ -53,6 +53,7 @@ typedef struct demux_image_s {
   input_plugin_t       *input;
   int                   status;
   int                   buf_type;
+  int                   decoder_flags;
   int                   bytes_left;
 } demux_image_t ;
 
@@ -86,7 +87,8 @@ static int demux_image_next (demux_plugin_t *this_gen, int decoder_flags) {
   buf_element_t *buf = this->video_fifo->buffer_pool_size_alloc (this->video_fifo, this->bytes_left);
 
   buf->content = buf->mem;
-  buf->decoder_flags = decoder_flags;
+  buf->decoder_flags = this->decoder_flags | decoder_flags;
+  this->decoder_flags = 0;
 
   buf->size = this->input->read (this->input, (char *)buf->mem, buf->max_size);
 
@@ -131,15 +133,18 @@ static void demux_image_send_headers (demux_plugin_t *this_gen) {
     this->status = DEMUX_FINISHED;
     return;
   }
+  this->decoder_flags = BUF_FLAG_FRAME_START;
   this->bytes_left = this->input->get_length (this->input);
   if (this->bytes_left < 0)
     this->bytes_left = 0;
 
   /* we can send everything here. this makes image decoder a lot easier */
   while (demux_image_next(this_gen, BUF_FLAG_PREVIEW) == DEMUX_OK);
+  this->decoder_flags = BUF_FLAG_FRAME_START;
 
   this->status = DEMUX_OK;
 
+  _x_stream_info_set (this->stream, XINE_STREAM_INFO_VIDEO_HAS_STILL, 1);
   _x_stream_info_set(this->stream, XINE_STREAM_INFO_HAS_VIDEO, 1);
   _x_stream_info_set(this->stream, XINE_STREAM_INFO_HAS_AUDIO, 0);
 }
@@ -151,8 +156,9 @@ static int demux_image_seek (demux_plugin_t *this_gen,
 
   (void)start_pos;
   (void)start_time;
-  (void)playing;
-  /* delay finished event for presentation mode.
+  if (!playing) 
+    _x_demux_control_newpts (this->stream, 0, 0);
+ /* delay finished event for presentation mode.
    * -1 => wait forever
    * 0  => do not wait
    * xx => wait xx/10 seconds
@@ -288,4 +294,3 @@ const plugin_info_t xine_plugin_info[] EXPORTED = {
   { PLUGIN_DEMUX, 27, "image", XINE_VERSION_CODE, &demux_info_image, init_class },
   { PLUGIN_NONE, 0, NULL, 0, NULL, NULL }
 };
-

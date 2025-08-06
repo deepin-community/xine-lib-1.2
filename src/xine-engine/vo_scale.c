@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2000-2022 the xine project
+ * Copyright (C) 2000-2024 the xine project
  *
  * This file is part of xine, a free video player.
  *
@@ -111,12 +111,8 @@ void _x_vo_scale_compute_ideal_size (vo_scale_t *this) {
  */
 
 void _x_vo_scale_compute_output_size (vo_scale_t *this) {
-
-  int    cropped_width, cropped_height;
-
-  cropped_width  = this->delivered_width - (this->crop_left + this->crop_right);
-  cropped_height = this->delivered_height - (this->crop_top + this->crop_bottom);
-
+  int cropped_width  = this->delivered_width - (this->crop_left + this->crop_right);
+  int cropped_height = this->delivered_height - (this->crop_top + this->crop_bottom);
 
   if (this->scaling_disabled & ~1) {
 
@@ -151,7 +147,7 @@ void _x_vo_scale_compute_output_size (vo_scale_t *this) {
 
         this->output_height = sh;
         zh = (double)this->output_height * this->zoom_factor_y + 0.5;
-        if( zh <= this->gui_height ) {
+        if (zh <= this->gui_height) {
           this->displayed_height = cropped_height;
           this->output_height = zh;
         } else {
@@ -166,7 +162,7 @@ void _x_vo_scale_compute_output_size (vo_scale_t *this) {
 
         this->output_width = sw;
         zw = (double)this->output_width * this->zoom_factor_x + 0.5;
-        if( zw <= this->gui_width ) {
+        if (zw <= this->gui_width) {
           this->displayed_width = cropped_width;
           this->output_width = zw;
         } else {
@@ -210,12 +206,14 @@ void _x_vo_scale_compute_output_size (vo_scale_t *this) {
   }
 
   this->output_xoffset =
-    (this->gui_width - this->output_width) * this->output_horizontal_position + this->gui_x;
+    (int)((this->gui_width - this->output_width) * this->output_horizontal_position) + this->gui_x;
   this->output_yoffset =
-    (this->gui_height - this->output_height) * this->output_vertical_position + this->gui_y;
+    (int)((this->gui_height - this->output_height) * this->output_vertical_position) + this->gui_y;
 
-  this->displayed_xoffset = ((cropped_width -  this->displayed_width) / 2) + this->crop_left;
-  this->displayed_yoffset = ((cropped_height - this->displayed_height) / 2) + this->crop_top;
+  this->displayed_xoffset =
+    (int)((cropped_width - this->displayed_width) * this->output_horizontal_position) + this->crop_left;
+  this->displayed_yoffset =
+    (int)((cropped_height - this->displayed_height) * this->output_vertical_position) + this->crop_top;
 
   lprintf ("frame source %d x %d (%d x %d) => screen output %d x %d\n",
 	   this->delivered_width, this->delivered_height,
@@ -557,3 +555,4 @@ void _x_vo_scale_init (vo_scale_t *this, int support_zoom, int scaling_disabled,
 	"sharpness.\n"),
       10, vo_scale_square_pixels_changed, this);
 }
+
