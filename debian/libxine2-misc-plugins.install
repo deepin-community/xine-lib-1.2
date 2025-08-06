@@ -9,11 +9,11 @@ debian/tmp/usr/lib/*/xine/plugins/*/xineplug_inp_mms.so
 debian/tmp/usr/lib/*/xine/plugins/*/xineplug_inp_network.so
 [linux-any] debian/tmp/usr/lib/*/xine/plugins/*/xineplug_inp_pvr.so
 debian/tmp/usr/lib/*/xine/plugins/*/xineplug_inp_rtp.so
-[!hurd-i386] debian/tmp/usr/lib/*/xine/plugins/*/xineplug_inp_smb.so
+debian/tmp/usr/lib/*/xine/plugins/*/xineplug_inp_smb.so
 #[linux-any] debian/tmp/usr/lib/*/xine/plugins/*/xineplug_inp_v4l.so
 [linux-any] debian/tmp/usr/lib/*/xine/plugins/*/xineplug_inp_v4l2.so
 debian/tmp/usr/lib/*/xine/plugins/*/xineplug_inp_vcd.so
-[!hurd-i386] debian/tmp/usr/lib/*/xine/plugins/*/xineplug_inp_vcdo.so
+[!hurd-any] debian/tmp/usr/lib/*/xine/plugins/*/xineplug_inp_vcdo.so
 
 # audio output plugins
 [linux-any] debian/tmp/usr/lib/*/xine/plugins/*/xineplug_ao_out_alsa.so
@@ -26,13 +26,11 @@ debian/tmp/usr/lib/*/xine/plugins/*/xineplug_vo_out_raw.so
 [linux-any] debian/tmp/usr/lib/*/xine/plugins/*/xineplug_dxr3.so
 
 # decoder plugins
-debian/tmp/usr/lib/*/xine/plugins/*/xineplug_decode_dav1d.so
 debian/tmp/usr/lib/*/xine/plugins/*/xineplug_decode_dvaudio.so
 #[linux-any] debian/tmp/usr/lib/*/xine/plugins/*/xineplug_decode_dxr3_spu.so
 #[linux-any] debian/tmp/usr/lib/*/xine/plugins/*/xineplug_decode_dxr3_video.so
 debian/tmp/usr/lib/*/xine/plugins/*/xineplug_decode_gsm610.so
 debian/tmp/usr/lib/*/xine/plugins/*/xineplug_decode_image.so
-debian/tmp/usr/lib/*/xine/plugins/*/xineplug_decode_libaom.so
 debian/tmp/usr/lib/*/xine/plugins/*/xineplug_decode_libjpeg.so
 debian/tmp/usr/lib/*/xine/plugins/*/xineplug_decode_libvpx.so
 debian/tmp/usr/lib/*/xine/plugins/*/xineplug_decode_lpcm.so

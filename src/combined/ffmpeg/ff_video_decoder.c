@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2001-2021 the xine project
+ * Copyright (C) 2001-2024 the xine project
  *
  * This file is part of xine, a free video player.
  *
@@ -32,11 +32,18 @@
 #include <math.h>
 #include <assert.h>
 
-#ifdef HAVE_FFMPEG_AVUTIL_H
-#  include <avcodec.h>
-#else
-#  include <libavcodec/avcodec.h>
+#if defined(HAVE_LIBAVUTIL_AVUTIL_H)
+#  include <libavutil/avutil.h>
+#endif
+
+#if defined(HAVE_LIBAVUTIL_MEM_H)
 #  include <libavutil/mem.h>
+#endif
+
+#if defined(HAVE_AVUTIL_AVCODEC_H)
+#  include <libavcodec/avcodec.h>
+#else
+#  include <avcodec.h>
 #endif
 
 #define LOG_MODULE "ffmpeg_video_dec"
@@ -82,6 +89,11 @@
 # define ENABLE_EMMS
 #endif
 
+/*
+#undef XFF_AVCODEC_SLICE_TABLE
+#define XFF_AVCODEC_SLICE_TABLE 1
+*/
+
 #define VIDEOBUFSIZE        (128*1024)
 #define SLICE_BUFFER_SIZE   (1194*1024)
 
@@ -121,13 +133,13 @@ struct ff_video_decoder_s {
 
   int64_t           pts;
   int64_t           last_pts;
+  int64_t           tagged_pts;
   int               video_step;
   int               reported_video_step;
   uint8_t           pts_tag_pass;
 
   uint8_t           decoder_ok:1;
   uint8_t           decoder_init_mode:1;
-  uint8_t           is_mpeg12:1;
 #ifdef HAVE_POSTPROC
   uint8_t           pp_available:1;
 #endif
@@ -141,11 +153,11 @@ struct ff_video_decoder_s {
   int               bufsize;
   int               size;
   int               skipframes;
-
+#if XFF_AVCODEC_SLICE_TABLE == 1
   int              *slice_offset_table;
   int               slice_offset_size;
   int               slice_offset_pos;
-
+#endif
   AVFrame          *av_frame;
   AVFrame          *av_frame2;
   AVCodecContext   *context;
@@ -230,6 +242,13 @@ struct ff_video_decoder_s {
 
 #if XFF_VIDEO > 1
   XFF_PACKET_DECL (avpkt);
+#endif
+
+#if XFF_AVCODEC_SLICE_TABLE == 2
+  uint8_t          *temp_buf;
+  uint32_t          temp_size;
+  int               slice_num;
+  uint8_t           slice_table[1 + 256 * 8];
 #endif
 };
 
@@ -545,7 +564,9 @@ static int get_buffer_vaapi_vld (AVCodecContext *context, AVFrame *av_frame)
 #  ifdef XFF_FRAME_AGE
   av_frame->age = 1;
 #  endif
+#ifdef XFF_AVCODEC_REORDERED_OPAQUE
   av_frame->reordered_opaque = context->reordered_opaque;
+#endif
 
   ffsf = ffsf_new (this);
   if (!ffsf)
@@ -856,7 +877,9 @@ static int get_buffer (AVCodecContext *context, AVFrame *av_frame)
 # endif
 
   /* take over pts for this frame to have it reordered */
+#ifdef XFF_AVCODEC_REORDERED_OPAQUE
   av_frame->reordered_opaque = context->reordered_opaque;
+#endif
 
   return 0;
 }
@@ -1136,9 +1159,13 @@ static void init_video_codec (ff_video_decoder_t *this, unsigned int codec_type)
   if (this->codec->id == CODEC_ID_VC1 &&
       (!this->bih.biWidth || !this->bih.biHeight)) {
     /* VC1 codec must be re-opened with correct width and height. */
-    avcodec_close(this->context);
-
-    if (XFF_AVCODEC_OPEN (this->context, this->codec) < 0) {
+    if (this->context) {
+      _x_freep (&this->context->extradata);
+      this->context->extradata_size = 0;
+      XFF_FREE_CONTEXT (this->context);
+    }
+    this->context = XFF_ALLOC_CONTEXT ();
+    if (!(this->context && XFF_AVCODEC_OPEN (this->context, this->codec) >= 0)) {
       pthread_mutex_unlock(&ffmpeg_lock);
       xprintf (this->stream->xine, XINE_VERBOSITY_LOG,
 	       _("ffmpeg_video_dec: couldn't open decoder (pass 2)\n"));
@@ -1204,6 +1231,11 @@ static void init_video_codec (ff_video_decoder_t *this, unsigned int codec_type)
 #ifdef XFF_AVCODEC_REORDERED_OPAQUE
   /* dont want initial AV_NOPTS_VALUE here */
   this->context->reordered_opaque = 0;
+#endif
+
+#ifdef XFF_AVCODEC_FRAME_PTS
+  this->context->time_base.num = 1;
+  this->context->time_base.den = 90000 << 8;
 #endif
 }
 
@@ -1392,7 +1424,7 @@ static void ff_setup_rgb2yuy2 (ff_video_decoder_t *this, int pix_fmt) {
 #if defined(AV_PIX_FMT_YUV420P9) || defined(AV_PIX_FMT_YUV420P10)
 static void ff_get_deep_color (uint8_t *src, int sstride, uint8_t *dest, int dstride,
   int width, int height, uint8_t *tab) {
-  uint16_t *p = (uint16_t *) src;
+  uint16_t *p = (uint16_t *)ASSUME_ALIGNED_2 (src, 2);
   uint8_t  *q = dest;
   int       spad = sstride / 2 - width;
   int       dpad = dstride - width;
@@ -1699,7 +1731,7 @@ static int ff_vc1_find_header(ff_video_decoder_t *this, buf_element_t *buf)
 
 static int ff_check_extradata(ff_video_decoder_t *this, unsigned int codec_type, buf_element_t *buf)
 {
-  if (this->context && this->context->extradata)
+  if (this->context->extradata)
     return 1;
 
   switch (codec_type) {
@@ -1713,8 +1745,6 @@ static int ff_check_extradata(ff_video_decoder_t *this, unsigned int codec_type,
 
 static void ff_init_mpeg12_mode(ff_video_decoder_t *this)
 {
-  this->is_mpeg12 = 1;
-
   if (this->decoder_init_mode) {
     _x_meta_info_set_utf8(this->stream, XINE_META_INFO_VIDEOCODEC,
                           "mpeg-1 (ffmpeg)");
@@ -1725,7 +1755,8 @@ static void ff_init_mpeg12_mode(ff_video_decoder_t *this)
 
   if ( this->mpeg_parser == NULL ) {
     this->mpeg_parser = calloc(1, sizeof(mpeg_parser_t));
-    mpeg_parser_init(this->mpeg_parser, AV_INPUT_BUFFER_PADDING_SIZE);
+    if (this->mpeg_parser)
+      mpeg_parser_init(this->mpeg_parser, AV_INPUT_BUFFER_PADDING_SIZE);
   }
 }
 
@@ -1739,7 +1770,7 @@ static void ff_handle_preview_buffer (ff_video_decoder_t *this, buf_element_t *b
     ff_init_mpeg12_mode(this);
   }
 
-  if (this->decoder_init_mode && !this->is_mpeg12) {
+  else if (this->decoder_init_mode && !this->mpeg_parser) {
 
     if (!ff_check_extradata(this, codec_type, buf))
       return;
@@ -1764,10 +1795,9 @@ static void ff_handle_header_buffer (ff_video_decoder_t *this, buf_element_t *bu
   this->size += buf->size;
 
   if (buf->decoder_flags & BUF_FLAG_FRAME_END) {
-    int codec_type;
+    uint32_t codec_type = buf->type & 0xFFFF0000;
 
     lprintf ("header complete\n");
-    codec_type = buf->type & 0xFFFF0000;
 
     if (buf->decoder_flags & BUF_FLAG_STDHEADER) {
 
@@ -1799,22 +1829,24 @@ static void ff_handle_header_buffer (ff_video_decoder_t *this, buf_element_t *bu
 #ifdef XFF_AVCODEC_SUB_ID
         this->context->sub_id = _X_BE_32(&this->buf[30]);
 #endif
-        this->context->extradata_size = this->size - 26;
-	if (this->context->extradata_size < 8) {
-	  this->context->extradata_size= 8;
-	  this->context->extradata = calloc(1, this->context->extradata_size +
-                                            AV_INPUT_BUFFER_PADDING_SIZE);
-          ((uint32_t *)this->context->extradata)[0] = 0;
-	  if (codec_type == BUF_VIDEO_RV10)
-	     ((uint32_t *)this->context->extradata)[1] = 0x10000000;
-	  else
-	     ((uint32_t *)this->context->extradata)[1] = 0x10003001;
+        if (this->size < 8 + 26) {
+          uint32_t *b = calloc (1, 8 + AV_INPUT_BUFFER_PADDING_SIZE);
+          if (b) {
+            this->context->extradata_size = 8;
+            this->context->extradata = (uint8_t *)b;
+            b[0] = 0;
+            if (codec_type == BUF_VIDEO_RV10)
+              b[1] = 0x10000000;
+            else
+              b[1] = 0x10003001;
+          }
 	} else {
-          this->context->extradata = malloc(this->context->extradata_size +
-                                            AV_INPUT_BUFFER_PADDING_SIZE);
-	  memcpy(this->context->extradata, this->buf + 26,
-	         this->context->extradata_size);
-          memset(this->context->extradata + this->context->extradata_size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+          this->context->extradata = malloc (this->size - 26 + AV_INPUT_BUFFER_PADDING_SIZE);
+          if (this->context->extradata) {
+            this->context->extradata_size = this->size - 26;
+            memcpy (this->context->extradata, this->buf + 26, this->context->extradata_size);
+            memset (this->context->extradata + this->context->extradata_size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+          }
 	}
 
 	xprintf(this->stream->xine, XINE_VERBOSITY_LOG,
@@ -1891,33 +1923,44 @@ static void ff_handle_special_buffer (ff_video_decoder_t *this, buf_element_t *b
 #endif
   }
   else if (buf->decoder_info[1] == BUF_SPECIAL_RV_CHUNK_TABLE) {
-    /* o dear. Multiple decoding threads use individual contexts.
-      av_decode_video2 () does only copy the _pointer_ to the offsets,
-      not the offsets themselves. So we must not overwrite anything
-      that another thread has not yet read. */
-    int i, l, total;
+    {
+#if XFF_AVCODEC_SLICE_TABLE == 1
+      /* o dear. Multiple decoding threads use individual contexts.
+       * av_decode_video2 () does only copy the _pointer_ to the offsets,
+       * not the offsets themselves. So we must not overwrite anything
+       * that another thread has not yet read. */
+      int i, l, total;
 
-    lprintf("BUF_SPECIAL_RV_CHUNK_TABLE\n");
-    l = buf->decoder_info[2] + 1;
+      lprintf("BUF_SPECIAL_RV_CHUNK_TABLE\n");
+      l = buf->decoder_info[2] + 1;
 
-    total = l * this->class->thread_count;
-    if (total < SLICE_OFFSET_SIZE)
-      total = SLICE_OFFSET_SIZE;
-    if (total > this->slice_offset_size) {
-      this->slice_offset_table = realloc (this->slice_offset_table, total * sizeof (int));
-      this->slice_offset_size = total;
-    }
+      total = l * this->class->thread_count;
+      if (total < SLICE_OFFSET_SIZE)
+        total = SLICE_OFFSET_SIZE;
+      if (total > this->slice_offset_size) {
+        this->slice_offset_table = realloc (this->slice_offset_table, total * sizeof (int));
+        this->slice_offset_size = total;
+      }
 
-    if (this->slice_offset_pos + l > this->slice_offset_size)
-      this->slice_offset_pos = 0;
-    this->context->slice_offset = this->slice_offset_table + this->slice_offset_pos;
-    this->context->slice_count = l;
+      if (this->slice_offset_pos + l > this->slice_offset_size)
+        this->slice_offset_pos = 0;
+      this->context->slice_offset = this->slice_offset_table + this->slice_offset_pos;
+      this->context->slice_count = l;
 
-    lprintf ("slice_count=%d\n", l);
-    for (i = 0; i < l; i++) {
-      this->slice_offset_table[this->slice_offset_pos++] =
-        ((uint32_t *)buf->decoder_info_ptr[2])[(2 * i) + 1];
-      lprintf("slice_offset[%d]=%d\n", i, this->context->slice_offset[i]);
+      lprintf ("slice_count=%d\n", l);
+      for (i = 0; i < l; i++) {
+        this->slice_offset_table[this->slice_offset_pos++] =
+          ((uint32_t *)buf->decoder_info_ptr[2])[(2 * i) + 1];
+        lprintf("slice_offset[%d]=%d\n", i, this->context->slice_offset[i]);
+      }
+#elif XFF_AVCODEC_SLICE_TABLE == 2
+      /* (count-1):1, 1:4, (offs[0]):4, 1:4, (offs[1]:4, ... just in front of the frame bitstream.
+       * reverse engineered from ffmpeg/libavcodec/rv34.c. they seem to expect no
+       * external use of rv decoders, and did not document this. */
+      this->slice_table[0] = buf->decoder_info[2];
+      this->slice_num = this->slice_table[0] + 1;
+      memcpy (this->slice_table + 1, buf->decoder_info_ptr[2], 8 * this->slice_num);
+#endif
     }
   }
 }
@@ -1952,7 +1995,26 @@ static int64_t ff_tag_pts (ff_video_decoder_t *this, int64_t pts) {
   return (pts * 256) | this->pts_tag_pass;
 }
 
-static int64_t ff_untag_pts (ff_video_decoder_t *this, int64_t pts) {
+static int64_t ff_untag_pts (ff_video_decoder_t *this, AVFrame *av_frame) {
+  int64_t pts;
+#if defined(XFF_AVCODEC_FRAME_PTS)
+  pts = (av_frame->pts != AV_NOPTS_VALUE) ? av_frame->pts : 0;
+#  if defined(XFF_AVCODEC_REORDERED_OPAQUE)
+  /* paranoia !!! */
+  if (pts != av_frame->reordered_opaque) {
+    xprintf (this->stream->xine, XINE_VERBOSITY_DEBUG,
+      LOG_MODULE ": WARNING: frame pts %" PRId64 " != reordered_opaque %" PRId64 ".\n",
+      pts, av_frame->reordered_opaque);
+    pts = av_frame->reordered_opaque;
+  }
+  av_frame->reordered_opaque = 0;
+#  endif
+#elif defined(XFF_AVCODEC_REORDERED_OPAQUE)
+  pts = av_frame->reordered_opaque;
+  av_frame->reordered_opaque = 0;
+#else
+  pts = this->tagged_pts;
+#endif
   if ((uint8_t)(pts & 0xff) == this->pts_tag_pass) {
     /* restore sign. */
     return pts >> 8;
@@ -1964,6 +2026,7 @@ static int64_t ff_untag_pts (ff_video_decoder_t *this, int64_t pts) {
 
 static int decode_video_wrapper (ff_video_decoder_t *this,
   AVFrame *av_frame, int *err, void *buf, size_t buf_size) {
+  uint32_t tsize = 0;
   int len;
 
 #if ENABLE_VAAPI
@@ -1973,11 +2036,36 @@ static int decode_video_wrapper (ff_video_decoder_t *this,
   }
 #endif /* ENABLE_VAAPI */
 
+#if XFF_AVCODEC_SLICE_TABLE == 2
+  if ((this->slice_num > 0) && buf) {
+    uint32_t nsize;
+    tsize = 1 + this->slice_num * 8;
+    nsize = tsize + buf_size + AV_INPUT_BUFFER_PADDING_SIZE;
+    if (this->temp_size < nsize) {
+      nsize = nsize * 3 / 2;
+      free (this->temp_buf);
+      this->temp_buf = malloc (nsize);
+      if (!this->temp_buf)
+        nsize = 0;
+      this->temp_size = nsize;
+      nsize = tsize + buf_size + AV_INPUT_BUFFER_PADDING_SIZE;
+    }
+    if (this->temp_size >= nsize) {
+      memcpy (this->temp_buf, this->slice_table, tsize);
+      memcpy (this->temp_buf + tsize, buf, buf_size + AV_INPUT_BUFFER_PADDING_SIZE);
+      buf = this->temp_buf;
+    }
+    this->slice_num = 0;
+  }
+#endif
+
 #if XFF_VIDEO > 1
   this->avpkt->data = buf;
-  this->avpkt->size = buf_size;
+  this->avpkt->size = buf_size + tsize;
   this->avpkt->flags = AV_PKT_FLAG_KEY;
-
+# ifdef XFF_AVCODEC_FRAME_PTS
+  this->avpkt->pts = this->tagged_pts;
+# endif
 # if XFF_PALETTE == 2 || XFF_PALETTE == 3
   if (buf && this->palette_changed) {
     uint8_t *sd = av_packet_new_side_data (this->avpkt, AV_PKT_DATA_PALETTE, 256 * 4);
@@ -2066,9 +2154,12 @@ static void ff_handle_mpeg12_buffer (ff_video_decoder_t *this, buf_element_t *bu
 
   lprintf("handle_mpeg12_buffer\n");
 
-  if (!this->is_mpeg12) {
+  if (!this->mpeg_parser) {
     /* initialize mpeg parser */
     ff_init_mpeg12_mode(this);
+    if (!this->mpeg_parser) {
+      return;
+    }
   }
 
 #ifdef DEBUG_MPEG_PARSER
@@ -2084,9 +2175,14 @@ static void ff_handle_mpeg12_buffer (ff_video_decoder_t *this, buf_element_t *bu
 #endif
 
     /* apply valid pts to first frame _starting_ thereafter only */
-    if (this->pts && !this->context->reordered_opaque) {
-      this->context->reordered_opaque = 
-      this->av_frame->reordered_opaque = ff_tag_pts (this, this->pts);
+    if (this->pts && !this->tagged_pts) {
+      this->tagged_pts = ff_tag_pts (this, this->pts);
+#ifdef XFF_AVCODEC_REORDERED_OPAQUE
+      this->context->reordered_opaque = this->av_frame->reordered_opaque = this->tagged_pts;
+#endif
+#ifdef XFF_AVCODEC_FRAME_PTS
+      this->av_frame->pts = this->tagged_pts;
+#endif
       this->pts = 0;
     }
 
@@ -2197,9 +2293,11 @@ static void ff_handle_mpeg12_buffer (ff_video_decoder_t *this, buf_element_t *bu
       img->top_field_first   = this->av_frame->top_field_first;
 
       /* get back reordered pts */
-      img->pts = ff_untag_pts (this, this->av_frame->reordered_opaque);
-      this->av_frame->reordered_opaque = 0;
+      img->pts = ff_untag_pts (this, this->av_frame);
+      this->tagged_pts = 0;
+#ifdef XFF_AVCODEC_REORDERED_OPAQUE
       this->context->reordered_opaque = 0;
+#endif
 
       if (this->av_frame->repeat_pict)
         img->duration = this->video_step * 3 / 2;
@@ -2320,9 +2418,14 @@ static void ff_handle_buffer (ff_video_decoder_t *this, buf_element_t *buf) {
   }
 
   if (this->size == 0) {
+    this->tagged_pts = ff_tag_pts (this, this->pts);
     /* take over pts when we are about to buffer a frame */
-    this->av_frame->reordered_opaque = ff_tag_pts(this, this->pts);
-    this->context->reordered_opaque = ff_tag_pts(this, this->pts);
+#ifdef XFF_AVCODEC_REORDERED_OPAQUE
+    this->av_frame->reordered_opaque = this->context->reordered_opaque = this->tagged_pts;
+#endif
+#ifdef XFF_AVCODEC_FRAME_PTS
+    this->av_frame->pts = this->tagged_pts;
+#endif
     this->pts = 0;
   }
 
@@ -2395,7 +2498,10 @@ static void ff_handle_buffer (ff_video_decoder_t *this, buf_element_t *buf) {
         need_unref = 1;
 #endif
         /* reset consumed pts value */
-        this->context->reordered_opaque = ff_tag_pts(this, 0);
+        this->tagged_pts = ff_tag_pts (this, 0);
+#ifdef XFF_AVCODEC_REORDERED_OPAQUE
+        this->context->reordered_opaque = this->tagged_pts;
+#endif
 
         if (err) {
 
@@ -2426,13 +2532,16 @@ static void ff_handle_buffer (ff_video_decoder_t *this, buf_element_t *buf) {
           this->size -= len;
 
           if (this->size > 0) {
-            ff_check_bufsize(this, this->size);
             memmove (this->buf, &chunk_buf[offset], this->size);
             chunk_buf = this->buf;
-
             /* take over pts for next access unit */
-            this->av_frame->reordered_opaque = ff_tag_pts(this, this->pts);
-            this->context->reordered_opaque = ff_tag_pts(this, this->pts);
+            this->tagged_pts = ff_tag_pts (this, this->pts);
+#ifdef XFF_AVCODEC_REORDERED_OPAQUE
+            this->av_frame->reordered_opaque = this->context->reordered_opaque = this->tagged_pts;
+#endif
+#ifdef XFF_AVCODEC_FRAME_PTS
+            this->av_frame->pts = this->tagged_pts;
+#endif
             this->pts = 0;
           }
         }
@@ -2549,11 +2658,10 @@ static void ff_handle_buffer (ff_video_decoder_t *this, buf_element_t *buf) {
           ff_convert_frame(this, img, this->av_frame);
         }
 
-        img->pts  = ff_untag_pts(this, this->av_frame->reordered_opaque);
-        this->av_frame->reordered_opaque = 0;
+        img->pts  = ff_untag_pts(this, this->av_frame);
 
-        /* workaround for weird 120fps streams */
-        if( video_step_to_use == 750 ) {
+        /* workaround for weird 120fps streams, as well as some rv20 with frame duration 3pts. */
+        if (video_step_to_use <= 750) {
           /* fallback to the VIDEO_PTS_MODE */
           video_step_to_use = 0;
         }
@@ -2590,8 +2698,7 @@ static void ff_handle_buffer (ff_video_decoder_t *this, buf_element_t *buf) {
                                                 this->output_format,
                                                 VO_BOTH_FIELDS|this->frame_flags);
       /* set PTS to allow early syncing */
-      img->pts       = ff_untag_pts(this, this->av_frame->reordered_opaque);
-      this->av_frame->reordered_opaque = 0;
+      img->pts       = ff_untag_pts(this, this->av_frame);
 
       img->duration  = video_step_to_use;
 
@@ -2653,7 +2760,7 @@ static void ff_decode_data (video_decoder_t *this_gen, buf_element_t *buf) {
       }
 
     } else {
-      if (this->decoder_init_mode && !this->is_mpeg12)
+      if (this->decoder_init_mode)
         ff_handle_preview_buffer(this, buf);
 
       /* decode */
@@ -2773,9 +2880,9 @@ static void ff_flush_internal (ff_video_decoder_t *this, int display) {
       ff_convert_frame (this, img, this->av_frame2);
     }
 
-    img->pts = ff_untag_pts (this, this->av_frame2->reordered_opaque);
+    img->pts = ff_untag_pts (this, this->av_frame2);
 
-    if (video_step_to_use == 750)
+    if (video_step_to_use <= 750)
       video_step_to_use = 0;
     img->duration = this->av_frame2->repeat_pict ? video_step_to_use * 3 / 2 : video_step_to_use;
     img->progressive_frame = !this->av_frame2->interlaced_frame;
@@ -2875,10 +2982,13 @@ static void ff_reset (video_decoder_t *this_gen) {
 #endif
   }
 
-  if (this->is_mpeg12)
+  if (this->mpeg_parser)
     mpeg_parser_reset(this->mpeg_parser);
 
   /* this->pts_tag_pass = 0; */
+#if XFF_AVCODEC_SLICE_TABLE == 2
+  this->slice_num = 0;
+#endif
 }
 
 static void ff_dispose (video_decoder_t *this_gen) {
@@ -2891,10 +3001,15 @@ static void ff_dispose (video_decoder_t *this_gen) {
   rgb2yuy2_free (this->rgb2yuy2);
 
   if (this->decoder_ok) {
+    uint8_t *ed;
 
     pthread_mutex_lock(&ffmpeg_lock);
-    avcodec_close (this->context);
+    ed = this->context->extradata;
+    this->context->extradata = NULL;
+    this->context->extradata_size = 0;
+    XFF_FREE_CONTEXT (this->context);
     pthread_mutex_unlock(&ffmpeg_lock);
+    _x_freep (&ed);
 
 #ifdef ENABLE_DIRECT_RENDERING
     ff_free_dr1_frames (this, 1);
@@ -2902,16 +3017,17 @@ static void ff_dispose (video_decoder_t *this_gen) {
 
     this->stream->video_out->close(this->stream->video_out, this->stream);
     this->decoder_ok = 0;
-  }
-
-  if (this->slice_offset_table)
-    free (this->slice_offset_table);
-
-  if (this->context) {
+  } else if (this->context) {
     _x_freep (&this->context->extradata);
     this->context->extradata_size = 0;
     XFF_FREE_CONTEXT (this->context);
   }
+
+#if XFF_AVCODEC_SLICE_TABLE == 1
+  free (this->slice_offset_table);
+#elif XFF_AVCODEC_SLICE_TABLE == 2
+  free (this->temp_buf);
+#endif
 
 #if XFF_VIDEO > 1
   XFF_PACKET_UNREF (this->avpkt);
@@ -2997,24 +3113,27 @@ static video_decoder_t *ff_video_open_plugin (video_decoder_class_t *class_gen, 
 #ifndef HAVE_ZERO_SAFE_MEM
   this->size            = 0;
   this->decoder_ok      = 0;
-  this->is_mpeg12       = 0;
   this->aspect_ratio    = 0;
   this->pts_tag_pass    = 0;
-#ifdef HAVE_POSTPROC
+#  ifdef HAVE_POSTPROC
   this->pp_quality      = 0;
   this->our_context     = NULL;
   this->our_mode        = NULL;
-#endif
+#  endif
   this->mpeg_parser     = NULL;
   this->set_stream_info = 0;
   this->rgb2yuy2        = NULL;
-#ifdef ENABLE_VAAPI
+#  ifdef ENABLE_VAAPI
   this->accel           = NULL;
   this->accel_img       = NULL;
-#endif
-#if XFF_VIDEO == 3
+#  endif
+#  if XFF_VIDEO == 3
   this->flush_packet_sent = 0;
-#endif
+#  endif
+#  if XFF_AVCODEC_SLICE_TABLE == 2
+  this->temp_size       = 0;
+  this->temp_buf        = NULL;
+#  endif
 #endif
 
   this->video_decoder.decode_data   = ff_decode_data;

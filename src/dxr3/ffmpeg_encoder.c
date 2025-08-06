@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2000-2021 the xine project
+ * Copyright (C) 2000-2024 the xine project
  *
  * This file is part of xine, a unix video player.
  *
@@ -123,14 +123,12 @@ static int lavc_prepare_frame(lavc_data_t *this, dxr3_driver_t *drv, dxr3_frame_
 static int lavc_on_update_format(dxr3_driver_t *drv, dxr3_frame_t *frame)
 {
   lavc_data_t *this = (lavc_data_t *)drv->enc;
-  AVCodec *codec;
+  const AVCodec *codec;
   unsigned char use_quantizer;
 
   if (this->context) {
-    avcodec_close(this->context);
-    free(this->context);
+    XFF_FREE_CONTEXT (this->context);
     free(this->picture);
-    this->context = NULL;
     this->picture = NULL;
   }
 
@@ -223,7 +221,7 @@ static int lavc_on_update_format(dxr3_driver_t *drv, dxr3_frame_t *frame)
   this->context->gop_size = 0; /*intra frames only */
 /* TJ. this version is known to have that but maybe its not the first. */
 #if LIBAVCODEC_VERSION_INT >= XFF_INT_VERSION(56,56,101)
-  av_opt_set_int (codec, "motion_est", 0 /* "zero" */, 0);
+  av_opt_set_int (this->context->priv_data, "motion_est", 0 /* "zero" */, 0);
 #else
   this->context->me_method = ME_ZERO; /*motion estimation type*/
 #endif
@@ -344,10 +342,8 @@ static int lavc_on_unneeded(dxr3_driver_t *drv)
 #if XFF_ENCVIDEO > 1
     XFF_PACKET_UNREF (this->pkt);
 #endif
-    avcodec_close(this->context);
     XFF_FREE_CONTEXT (this->context);
     free(this->picture);
-    this->context = NULL;
     this->picture = NULL;
   }
   return 1;

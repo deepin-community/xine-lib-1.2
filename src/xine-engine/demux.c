@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2000-2021 the xine project
+ * Copyright (C) 2000-2023 the xine project
  *
  * This file is part of xine, a free video player.
  *
@@ -440,26 +440,33 @@ static void *demux_loop (void *stream_gen) {
 
     if (stream->demux.thread_running && (status == DEMUX_FINISHED)) do {
       struct timespec ts = {0, 0};
-      if (stream->delay_finish_event > 0) {
-        /* delay sending finished event - used for image presentations */
+      int delay_finish_event;
+
+      xine_rwlock_rdlock (&stream->side_streams[0]->info_lock);
+      delay_finish_event = stream->delay_finish_event;
+      xine_rwlock_unlock (&stream->side_streams[0]->info_lock);
+      if (delay_finish_event != 0) {
+        xine_rwlock_wrlock (&stream->side_streams[0]->info_lock);
+        stream->delay_finish_event = 0;
+        xine_rwlock_unlock (&stream->side_streams[0]->info_lock);
         xine_gettime (&ts);
-        ts.tv_sec  +=  stream->delay_finish_event / 10;
-        ts.tv_nsec += (stream->delay_finish_event % 10) * 100000000;
-        if (ts.tv_nsec >= 1000000000) {
-          ts.tv_nsec -= 1000000000;
-          ts.tv_sec  += 1;
+        if (delay_finish_event > 0) {
+          /* delay sending finished event - used for image presentations */
+          ts.tv_sec  +=  delay_finish_event / 10;
+          ts.tv_nsec += (delay_finish_event % 10) * 100000000;
+          if (ts.tv_nsec >= 1000000000) {
+            ts.tv_nsec -= 1000000000;
+            ts.tv_sec  += 1;
+          }
+        } else /* delay_finish_event < 0 */ {
+          /* infinitely delay sending finished event - used for image presentations */
+          do {
+            ts.tv_sec += 1;
+            pthread_cond_timedwait (&stream->demux.resume, &stream->demux.lock, &ts);
+            status = stream->demux.plugin->get_status (stream->demux.plugin);
+          } while (stream->demux.thread_running && (status == DEMUX_FINISHED));
+          break;
         }
-        stream->delay_finish_event = 0;
-      } else if (stream->delay_finish_event < 0) {
-        /* infinitely delay sending finished event - used for image presentations */
-        stream->delay_finish_event = 0;
-        xine_gettime (&ts);
-        do {
-          ts.tv_sec += 1;
-          pthread_cond_timedwait (&stream->demux.resume, &stream->demux.lock, &ts);
-          status = stream->demux.plugin->get_status (stream->demux.plugin);
-        } while (stream->demux.thread_running && (status == DEMUX_FINISHED));
-        break;
       } else {
         /* there may be no first frame at all here.
          * make sure xine_play returns first. */
@@ -598,6 +605,7 @@ int _x_demux_start_thread (xine_stream_t *s) {
                "demux: can't create new thread (%s)\n", strerror(err));
       stream->demux.thread_running = 0;
       stream->demux.thread_created = 0;
+      pthread_mutex_unlock (&stream->demux.lock);
       return -1;
     }
   }
@@ -647,7 +655,8 @@ int _x_demux_stop_thread (xine_stream_t *s) {
   return 0;
 }
 
-int _x_demux_read_header (input_plugin_t *input, void *buffer, off_t size) {
+int _x_demux_read_stream_header (xine_stream_t *stream, input_plugin_t *input, void *buffer, size_t size) {
+  xine_stream_private_t *s = (xine_stream_private_t *)stream;
   int want_size = size;
   uint32_t caps;
 
@@ -662,11 +671,17 @@ int _x_demux_read_header (input_plugin_t *input, void *buffer, off_t size) {
   }
 
   if (caps & INPUT_CAP_SEEKABLE) {
-    if (input->seek (input, 0, SEEK_SET) != 0)
+    int start = 0;
+
+    if (s && (s->id3v2_tag_size >= 0))
+      start = s->id3v2_tag_size;
+    if (input->seek (input, start, SEEK_SET) != start)
       return 0;
     want_size = input->read (input, buffer, want_size);
-    if (input->seek (input, 0, SEEK_SET) != 0)
+    if (input->seek (input, start, SEEK_SET) != start)
       return 0; /* no point to continue any further */
+    if (want_size <= 0)
+      return 0;
     return want_size;
   }
 
@@ -691,6 +706,10 @@ int _x_demux_read_header (input_plugin_t *input, void *buffer, off_t size) {
   }
 
   return 0;
+}
+
+int _x_demux_read_header (input_plugin_t *input, void *buffer, off_t size) {
+  return _x_demux_read_stream_header (NULL, input, buffer, size);
 }
 
 int _x_demux_check_extension (const char *mrl, const char *extensions){

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2013-2021 the xine project
+ * Copyright (C) 2013-2024 the xine project
  * Copyright (C) 2013-2020 Petri Hintukainen <phintuka@users.sourceforge.net>
  *
  * This file is part of xine, a free video player.
@@ -29,6 +29,8 @@
 #include <pthread.h>
 #include <errno.h>
 
+#include <libavutil/avutil.h>
+#include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavformat/avio.h>
 
@@ -69,7 +71,6 @@ typedef struct {
 
   char            *mrl;         /* 'public' mrl without authentication credentials */
   AVFormatContext *fmt_ctx;
-
 } avformat_input_plugin_t;
 
 static off_t input_avformat_read (input_plugin_t *this_gen, void *buf_gen, off_t len) {
@@ -265,10 +266,11 @@ void *init_avformat_input_plugin (xine_t *xine, const void *data) {
  */
 
 typedef struct {
-  demux_plugin_t        demux_plugin;
+  demux_plugin_t   demux_plugin;
 
-  xine_stream_t        *stream;
-  int                   status;
+  xine_stream_t   *stream;
+  int              status;
+  int              num_video_frames;
 
   AVFormatContext *fmt_ctx;
   int              video_stream_idx; /* selected avformat video stream */
@@ -279,10 +281,9 @@ typedef struct {
   uint32_t        *xine_buf_type;    /* xine buffer types. index: avformat stream_index */
 
   /* detect discontinuity */
-  int64_t               last_pts;
-  int                   send_newpts;
-  int                   seek_flag;
-
+  int64_t          last_pts;
+  int              send_newpts;
+  int              seek_flag;
 } avformat_demux_plugin_t;
 
 /*
@@ -421,8 +422,13 @@ static int find_avformat_streams(avformat_demux_plugin_t *this) {
     }
 
 #ifdef XFF_CODECPAR
+#  if XFF_AUDIO_CHANNEL_LAYOUT < 2
     if (st->codecpar && st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO &&
         st->codecpar->sample_rate != 0 && st->codecpar->channels != 0)
+#  else
+    if (st->codecpar && st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO &&
+        st->codecpar->sample_rate != 0 && st->codecpar->ch_layout.nb_channels != 0)
+#  endif
 #else
     if (st->codec && st->codec->codec_type == AVMEDIA_TYPE_AUDIO &&
         st->codec->sample_rate != 0 && st->codec->channels != 0)
@@ -499,7 +505,11 @@ static void send_headers_audio(avformat_demux_plugin_t *this) {
   buf->size = extradata_size + sizeof(xine_waveformatex);
   buf->decoder_info[1] = ctx->sample_rate;
   buf->decoder_info[2] = ctx->bits_per_coded_sample;
+#if XFF_AUDIO_CHANNEL_LAYOUT < 2
   buf->decoder_info[3] = ctx->channels;
+#else
+  buf->decoder_info[3] = ctx->ch_layout.nb_channels;
+#endif
   buf->decoder_flags = BUF_FLAG_HEADER | BUF_FLAG_STDHEADER | BUF_FLAG_FRAME_END;
 
   this->stream->audio_fifo->put (this->stream->audio_fifo, buf);
@@ -587,6 +597,9 @@ static int send_avpacket(avformat_demux_plugin_t *this)
       check_newpts(this, pts);
     }
 
+    if ((buffer_type & BUF_MAJOR_MASK) == BUF_VIDEO_BASE)
+      this->num_video_frames++;
+
     _x_demux_send_data (fifo, pkt->data, pkt->size, pts, buffer_type, 0/*decoder_flags*/,
                        input_normpos, input_time, total_time, 0/*frame_number*/);
   }
@@ -662,6 +675,9 @@ static int demux_avformat_send_chunk (demux_plugin_t *this_gen) {
   avformat_demux_plugin_t *this = (avformat_demux_plugin_t *) this_gen;
 
   if (send_avpacket (this) < 0) {
+    /* auto detect still image in video container (webm, avif). */
+    if (this->num_video_frames == 1)
+      xine_set_param (this->stream, XINE_PARAM_DELAY_FINISHED_EVENT, -1);
     this->status = DEMUX_FINISHED;
   } else {
     this->status = DEMUX_OK;
@@ -898,6 +914,7 @@ static demux_plugin_t *open_demux_avformat_plugin (demux_class_t *class_gen,
 
   this->status = DEMUX_FINISHED;
   this->fmt_ctx = fmt_ctx;
+  this->num_video_frames = 0;
 
   /* check if the stream can be played */
   if (!find_avformat_streams(this)) {
@@ -922,3 +939,4 @@ void *init_avformat_demux_plugin (xine_t *xine, const void *data) {
   (void)data;
   return (demux_class_t *)&this;
 }
+
